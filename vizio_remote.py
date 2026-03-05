@@ -142,6 +142,43 @@ class VizioAPI:
         except Exception:
             pass
 
+    def get_sleep_timer(self):
+        """Returns current sleep timer value string."""
+        try:
+            r = self.session.get(
+                self._url("/menu_native/dynamic/tv_settings/timers"), timeout=3,
+            )
+            for item in r.json().get("ITEMS", []):
+                if item.get("CNAME") == "sleep_timer":
+                    return item.get("VALUE", "Off")
+        except Exception:
+            pass
+        return None
+
+    def set_sleep_timer(self, value):
+        """Set sleep timer. Fetches fresh hashval first."""
+        try:
+            r = self.session.get(
+                self._url("/menu_native/dynamic/tv_settings/timers"), timeout=3,
+            )
+            for item in r.json().get("ITEMS", []):
+                if item.get("CNAME") == "sleep_timer":
+                    hashval = item["HASHVAL"]
+                    break
+            else:
+                return
+            payload = {
+                "REQUEST": "MODIFY",
+                "VALUE": value,
+                "HASHVAL": hashval,
+            }
+            self.session.put(
+                self._url("/menu_native/dynamic/tv_settings/timers/sleep_timer"),
+                json=payload, timeout=3,
+            )
+        except Exception:
+            pass
+
 
 class WorkerSignals(QObject):
     finished = pyqtSignal()
@@ -160,7 +197,7 @@ class APIWorker(QRunnable):
 
 
 class StatusSignals(QObject):
-    result = pyqtSignal(object, object, object, object)
+    result = pyqtSignal(object, object, object, object, object)
 
 
 class StatusWorker(QRunnable):
@@ -173,7 +210,8 @@ class StatusWorker(QRunnable):
         power = self.api.get_power()
         volume, muted = self.api.get_audio()
         inp = self.api.get_current_input()
-        self.signals.result.emit(power, volume, muted, inp)
+        sleep = self.api.get_sleep_timer()
+        self.signals.result.emit(power, volume, muted, inp, sleep)
 
 
 DARK_STYLE = """
@@ -197,6 +235,8 @@ QSlider::groove:horizontal { height: 6px; background: #16213e; border-radius: 3p
 QSlider::handle:horizontal { width: 18px; height: 18px; margin: -6px 0;
     background: #533483; border-radius: 9px; }
 QSlider::sub-page:horizontal { background: #0f3460; border-radius: 3px; }
+QPushButton#close { background-color: #374151; min-height: 32px; }
+QPushButton#close:hover { background-color: #4b5563; }
 """
 
 
@@ -206,14 +246,14 @@ class RemoteWindow(QMainWindow):
         self.api = VizioAPI()
         self.pool = QThreadPool()
         self.setWindowTitle("Vizio Remote")
-        self.setFixedSize(340, 620)
+        self.setFixedSize(360, 780)
         self.setStyleSheet(DARK_STYLE)
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setSpacing(6)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 14, 16, 14)
 
         # Status bar
         self.status_label = QLabel("Connecting...")
@@ -233,7 +273,7 @@ class RemoteWindow(QMainWindow):
 
         # Vol/Ch block
         grid = QGridLayout()
-        grid.setSpacing(4)
+        grid.setSpacing(8)
         grid.addWidget(self._btn("Vol+", "VOL_UP"), 0, 0)
         grid.addWidget(self._btn("Ch+", "CH_UP"), 0, 2)
         grid.addWidget(self._btn("Mute", "MUTE"), 1, 0)
@@ -244,7 +284,7 @@ class RemoteWindow(QMainWindow):
 
         # D-pad
         dpad = QGridLayout()
-        dpad.setSpacing(2)
+        dpad.setSpacing(4)
         dpad.addWidget(self._btn("\u25B2", "UP", obj_name="dpad"), 0, 1)
         dpad.addWidget(self._btn("\u25C0", "LEFT", obj_name="dpad"), 1, 0)
         dpad.addWidget(self._btn("OK", "OK", obj_name="ok"), 1, 1)
@@ -270,6 +310,14 @@ class RemoteWindow(QMainWindow):
             bottom.addWidget(self._btn(label, key))
         layout.addLayout(bottom)
 
+        # Sleep timer row
+        sleep_row = QHBoxLayout()
+        self.sleep_btn = QPushButton("Sleep: --")
+        self.sleep_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.sleep_btn.clicked.connect(self._show_sleep_menu)
+        sleep_row.addWidget(self.sleep_btn)
+        layout.addLayout(sleep_row)
+
         # Volume slider
         slider_row = QHBoxLayout()
         slider_row.addWidget(QLabel("Vol"))
@@ -278,6 +326,14 @@ class RemoteWindow(QMainWindow):
         self.vol_slider.sliderReleased.connect(self._on_slider)
         slider_row.addWidget(self.vol_slider)
         layout.addLayout(slider_row)
+
+        layout.addStretch()
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
 
         # Status polling
         self.timer = QTimer()
@@ -309,6 +365,22 @@ class RemoteWindow(QMainWindow):
         worker = APIWorker(self.api.set_input, name)
         self.pool.start(worker)
 
+    def _show_sleep_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #16213e; color: #e0e0e0; border: 1px solid #0f3460; }"
+            "QMenu::item:selected { background-color: #533483; }"
+        )
+        for val in ["Off", "30 minutes", "60 minutes", "90 minutes", "120 minutes", "180 minutes"]:
+            action = menu.addAction(val)
+            action.triggered.connect(partial(self._set_sleep, val))
+        menu.exec_(self.sleep_btn.mapToGlobal(self.sleep_btn.rect().bottomLeft()))
+
+    def _set_sleep(self, value):
+        self.sleep_btn.setText(f"Sleep: {value}")
+        worker = APIWorker(self.api.set_sleep_timer, value)
+        self.pool.start(worker)
+
     def _send_key(self, key):
         worker = APIWorker(self.api.key_press, key)
         self.pool.start(worker)
@@ -326,7 +398,7 @@ class RemoteWindow(QMainWindow):
         worker.signals.result.connect(self._update_status)
         self.pool.start(worker)
 
-    def _update_status(self, power, volume, muted, inp):
+    def _update_status(self, power, volume, muted, inp, sleep):
         parts = []
         if power is not None:
             parts.append("ON" if power == 1 else "STANDBY")
@@ -342,6 +414,8 @@ class RemoteWindow(QMainWindow):
         if muted and muted != "Off":
             parts.append("MUTED")
         self.status_label.setText("  |  ".join(parts))
+        if sleep is not None:
+            self.sleep_btn.setText(f"Sleep: {sleep}")
 
     def keyPressEvent(self, event):
         key = event.key()
